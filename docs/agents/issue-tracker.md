@@ -21,6 +21,10 @@ Infer the repo from `git remote -v` when possible; `gh` does this automatically 
 
 Use heredocs for multi-line issue bodies and comments.
 
+## Pull Requests as a Triage Surface
+
+**PRs as a request surface: no.** Bug reports and feature requests belong in issues, not in PR comments. Review comments on an open PR are still actionable — triage and address them as described below.
+
 ## Branch and PR Workflow
 
 GitHub Issues are the work queue; pull requests are the review and merge record.
