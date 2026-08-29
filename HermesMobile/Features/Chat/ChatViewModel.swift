@@ -590,7 +590,7 @@ final class ChatViewModel {
         }
 
         let catalogName = modelCatalogGroups
-            .flatMap(\.models)
+            .flatMap(\.allModels)
             .firstMatchingSelection(modelID: currentModel, providerID: currentModelProvider)?
             .displayName
 
@@ -1177,7 +1177,7 @@ final class ChatViewModel {
         guard canContinueDraftSettingsRestore(expectedInteractionGeneration) else { return }
         if let modelID = settings.modelID,
            let option = modelCatalogGroups
-               .flatMap(\.slashAutocompleteModels)
+               .flatMap(\.allModels)
                .firstMatchingSelection(modelID: modelID, providerID: settings.modelProviderID),
            !option.matchesSelection(modelID: currentModel, providerID: currentModelProvider) {
             _ = await selectComposerModel(option, recordsInteraction: false)
@@ -3321,7 +3321,7 @@ final class ChatViewModel {
 
     private func modelOption(matching query: String) -> ModelCatalogOption? {
         let normalizedQuery = query.lowercased()
-        let options = modelCatalogGroups.flatMap(\.slashAutocompleteModels)
+        let options = modelCatalogGroups.flatMap(\.allModels)
 
         if let exact = options.first(where: { $0.id.lowercased() == normalizedQuery }) {
             return exact
