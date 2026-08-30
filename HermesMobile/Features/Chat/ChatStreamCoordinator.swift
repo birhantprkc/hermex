@@ -238,6 +238,27 @@ final class ChatStreamCoordinator {
         )
     }
 
+    func shouldPreserveLocalOptimisticMessages(
+        for preparation: ChatStreamLoadPreparation,
+        loadedActiveStreamID: String?
+    ) -> Bool {
+        guard let activeStreamIDBeforeLoad = preparation.activeStreamIDBeforeLoad else {
+            return false
+        }
+
+        // A same-stream `start()` (foreground reconnect / replay) bumps
+        // `runGeneration` without replacing the server run. Stream identity is
+        // the successor fence; generation would treat that restart as a new
+        // authority and drop the uncached optimistic row.
+        guard activeStreamID == activeStreamIDBeforeLoad else {
+            return false
+        }
+
+        let loadedActiveStreamID = loadedActiveStreamID?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return loadedActiveStreamID == activeStreamIDBeforeLoad
+    }
+
     func reconcileSessionLoad(
         loadedActiveStreamID rawLoadedActiveStreamID: String?,
         preparation: ChatStreamLoadPreparation,
