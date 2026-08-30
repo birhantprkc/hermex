@@ -410,6 +410,46 @@ struct SessionSummary: Decodable, Equatable, Hashable, Identifiable {
         matchType = nil
     }
 
+    /// Applies the import response without dropping list metadata that the
+    /// detail endpoint does not consistently return.
+    func mergingImportedDetail(_ detail: SessionDetail) -> SessionSummary {
+        let imported = SessionSummary(from: detail)
+        return SessionSummary(
+            sessionId: imported.sessionId ?? sessionId,
+            title: imported.title ?? title,
+            workspace: imported.workspace ?? workspace,
+            model: imported.model ?? model,
+            modelProvider: imported.modelProvider ?? modelProvider,
+            messageCount: imported.messageCount ?? messageCount,
+            createdAt: imported.createdAt ?? createdAt,
+            updatedAt: imported.updatedAt ?? updatedAt,
+            lastMessageAt: imported.lastMessageAt ?? lastMessageAt,
+            pinned: imported.pinned ?? pinned,
+            archived: imported.archived ?? archived,
+            projectId: imported.projectId ?? projectId,
+            profile: imported.profile ?? profile,
+            inputTokens: imported.inputTokens ?? inputTokens,
+            outputTokens: imported.outputTokens ?? outputTokens,
+            estimatedCost: imported.estimatedCost ?? estimatedCost,
+            activeStreamId: imported.activeStreamId ?? activeStreamId,
+            isStreaming: imported.isStreaming ?? isStreaming,
+            isCliSession: imported.isCliSession ?? isCliSession,
+            userMessageCount: imported.userMessageCount ?? userMessageCount,
+            hasPendingUserMessage: imported.hasPendingUserMessage ?? hasPendingUserMessage,
+            pendingStartedAt: imported.pendingStartedAt ?? pendingStartedAt,
+            worktreePath: imported.worktreePath ?? worktreePath,
+            sourceTag: imported.sourceTag ?? sourceTag,
+            rawSource: imported.rawSource ?? rawSource,
+            sessionSource: imported.sessionSource ?? sessionSource,
+            sourceLabel: imported.sourceLabel ?? sourceLabel,
+            parentSessionId: imported.parentSessionId ?? parentSessionId,
+            relationshipType: imported.relationshipType ?? relationshipType,
+            readOnly: imported.readOnly ?? readOnly,
+            isReadOnly: imported.isReadOnly ?? isReadOnly,
+            matchType: imported.matchType ?? matchType
+        )
+    }
+
     /// Mirrors all stored fields so local title patches preserve session-list metadata.
     /// Update this when `SessionSummary` gains a new stored property.
     func replacingTitle(with title: String) -> SessionSummary {
@@ -451,6 +491,11 @@ struct SessionSummary: Decodable, Equatable, Hashable, Identifiable {
 }
 
 extension SessionSummary {
+    private static let messagingSourceMarkers: Set<String> = [
+        "discord", "email", "matrix", "slack", "telegram", "wecom", "wecom_callback", "weixin"
+    ]
+    private static let cliSourceMarkers: Set<String> = ["acp", "cli", "desktop", "tui"]
+
     /// Delegated children are identified only by an explicit source marker.
     /// Parent linkage is shared by ordinary forks and compression continuations,
     /// so it must never classify a row as a subagent on its own.
@@ -474,6 +519,56 @@ extension SessionSummary {
     /// true value preserves that safety for other imported sessions.
     var isSessionReadOnly: Bool {
         isDelegatedSubagentSession || readOnly == true || isReadOnly == true
+    }
+
+    /// External sessions need the same import step hermes-webui performs before
+    /// opening them. An explicit WebUI source wins over stale CLI flags left on
+    /// an already-imported sidecar.
+    var requiresExternalImport: Bool {
+        if Self.normalizedSourceMarker(sessionSource) == "webui" { return false }
+        if Self.normalizedSourceMarker(sessionSource) == "messaging" { return true }
+
+        let markers = [rawSource, sourceTag, sourceLabel]
+            .compactMap(Self.normalizedSourceMarker)
+        return isCliSession == true
+            || markers.contains(where: Self.messagingSourceMarkers.contains)
+            || markers.contains(where: Self.cliSourceMarkers.contains)
+    }
+
+    /// The source chip shown by hermes-webui, preferring the server's label and
+    /// falling back to stable brand/acronym casing for older servers.
+    var sourceDisplayLabel: String? {
+        guard requiresExternalImport else { return nil }
+
+        if let label = Self.nonEmpty(sourceLabel), label.lowercased() != "webui" {
+            return label
+        }
+
+        let marker = [rawSource, sourceTag, sessionSource]
+            .compactMap(Self.normalizedSourceMarker)
+            .first { $0 != "messaging" && $0 != "webui" }
+
+        switch marker {
+        case "cli": return "CLI"
+        case "tui": return "TUI"
+        case "acp": return "ACP"
+        case "telegram": return "Telegram"
+        case "discord": return "Discord"
+        case "slack": return "Slack"
+        case "email": return "Email"
+        case "matrix": return "Matrix"
+        case "weixin": return "WeChat"
+        case "wecom": return "WeCom"
+        case "wecom_callback": return "WeCom Callback"
+        case "desktop": return "Desktop"
+        case let marker?:
+            return marker
+                .replacingOccurrences(of: "_", with: " ")
+                .replacingOccurrences(of: "-", with: " ")
+                .capitalized
+        case nil:
+            return isCliSession == true ? "CLI" : "Messaging"
+        }
     }
 
     var shouldAppearInSessionList: Bool {

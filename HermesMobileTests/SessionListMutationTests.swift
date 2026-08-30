@@ -2287,6 +2287,344 @@ final class SessionListMutationTests: XCTestCase {
     }
 
     @MainActor
+    func testOpeningExternalSessionImportsAndCachesAuthoritativeSession() async throws {
+        let context = try makeContext()
+        let viewModel = try makeViewModel { request in
+            switch request.url?.path {
+            case "/api/sessions":
+                return apiTestJSONResponse("""
+                {
+                  "sessions": [{
+                    "session_id": "telegram-1",
+                    "title": "Support chat",
+                    "pinned": true,
+                    "project_id": "support",
+                    "last_message_at": 1770000123,
+                    "active_stream_id": "stream-live",
+                    "is_streaming": true,
+                    "is_cli_session": true,
+                    "raw_source": "telegram",
+                    "session_source": "messaging",
+                    "source_label": "Telegram"
+                  }]
+                }
+                """, for: request)
+            case "/api/session/import_cli":
+                return apiTestJSONResponse("""
+                {
+                  "session": {
+                    "session_id": "telegram-1",
+                    "title": "Support chat",
+                    "workspace": "/workspace",
+                    "model": "test-model",
+                    "is_cli_session": true,
+                    "raw_source": "telegram",
+                    "session_source": "messaging",
+                    "source_label": "Telegram",
+                    "read_only": false,
+                    "messages": []
+                  },
+                  "imported": true
+                }
+                """, for: request)
+            default:
+                XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
+                throw URLError(.badURL)
+            }
+        }
+
+        await viewModel.load(modelContext: context)
+        let listed = try XCTUnwrap(viewModel.sessions.first)
+        let opened = await viewModel.sessionForOpening(listed, modelContext: context)
+
+        XCTAssertEqual(opened?.sessionId, "telegram-1")
+        XCTAssertEqual(opened?.sourceDisplayLabel, "Telegram")
+        XCTAssertEqual(opened?.readOnly, false)
+        XCTAssertEqual(opened?.pinned, true)
+        XCTAssertEqual(opened?.projectId, "support")
+        XCTAssertEqual(opened?.lastMessageAt, 1_770_000_123)
+        XCTAssertEqual(opened?.activeStreamId, "stream-live")
+        XCTAssertEqual(opened?.isStreaming, true)
+        XCTAssertEqual(viewModel.sessions.first, opened)
+        let cached = try XCTUnwrap(
+            CacheStore.cachedSessions(serverURL: URL(string: "https://example.test")!, in: context).first
+        )
+        XCTAssertEqual(cached.sourceDisplayLabel, "Telegram")
+        XCTAssertEqual(cached.readOnly, false)
+        XCTAssertEqual(cached.pinned, true)
+        XCTAssertEqual(cached.projectId, "support")
+        XCTAssertEqual(cached.lastMessageAt, 1_770_000_123)
+        XCTAssertEqual(cached.activeStreamId, "stream-live")
+        XCTAssertEqual(cached.isStreaming, true)
+    }
+
+    @MainActor
+    func testOpeningExternalReadOnlySessionKeepsComposerBlocked() async throws {
+        let viewModel = try makeViewModel { request in
+            XCTAssertEqual(request.url?.path, "/api/session/import_cli")
+            return apiTestJSONResponse("""
+            {
+              "session": {
+                "session_id": "telegram-read-only",
+                "is_cli_session": true,
+                "raw_source": "telegram",
+                "source_label": "Telegram",
+                "read_only": true,
+                "messages": []
+              },
+              "imported": false
+            }
+            """, for: request)
+        }
+        let listed = SessionSummary(
+            sessionId: "telegram-read-only",
+            isCliSession: true,
+            rawSource: "telegram",
+            sourceLabel: "Telegram"
+        )
+
+        let result = await viewModel.sessionForOpening(listed)
+        let opened = try XCTUnwrap(result)
+
+        XCTAssertTrue(opened.isSessionReadOnly)
+        XCTAssertEqual(
+            ChatView.composerReadOnlyMessage(for: opened, isViewingCachedData: false),
+            "Read-only"
+        )
+    }
+
+    @MainActor
+    func testOpeningExternalSessionFallsBackToCanonicalDetailAndRemainsRefreshable() async throws {
+        var requestedPaths: [String] = []
+        let viewModel = try makeViewModel { request in
+            let path = request.url?.path ?? "nil"
+            requestedPaths.append(path)
+
+            switch path {
+            case "/api/sessions":
+                return apiTestJSONResponse("""
+                {
+                  "sessions": [{
+                    "session_id": "telegram-existing",
+                    "title": "Support chat",
+                    "is_cli_session": true,
+                    "raw_source": "telegram",
+                    "source_label": "Telegram"
+                  }]
+                }
+                """, for: request)
+            case "/api/session/import_cli":
+                let response = HTTPURLResponse(
+                    url: try XCTUnwrap(request.url),
+                    statusCode: 503,
+                    httpVersion: nil,
+                    headerFields: ["Content-Type": "application/json"]
+                )
+                return (try XCTUnwrap(response), Data(#"{"error":"Refresh unavailable"}"#.utf8))
+            case "/api/session":
+                return apiTestJSONResponse("""
+                {
+                  "session": {
+                    "session_id": "telegram-existing",
+                    "title": "Support chat",
+                    "workspace": "/workspace",
+                    "is_cli_session": true,
+                    "raw_source": "telegram",
+                    "source_label": "Telegram",
+                    "read_only": false,
+                    "messages": []
+                  }
+                }
+                """, for: request)
+            default:
+                XCTFail("Unexpected request path: \(path)")
+                throw URLError(.badURL)
+            }
+        }
+
+        await viewModel.load()
+        let listed = try XCTUnwrap(viewModel.sessions.first)
+        let firstOpen = await viewModel.sessionForOpening(listed)
+        let secondOpen = await viewModel.sessionForOpening(try XCTUnwrap(firstOpen))
+
+        XCTAssertEqual(firstOpen?.sessionId, "telegram-existing")
+        XCTAssertEqual(secondOpen?.sessionId, "telegram-existing")
+        XCTAssertEqual(viewModel.sessions.first, secondOpen)
+        XCTAssertNil(viewModel.actionErrorMessage)
+        XCTAssertEqual(
+            requestedPaths,
+            [
+                "/api/sessions",
+                "/api/session/import_cli",
+                "/api/session",
+                "/api/session/import_cli",
+                "/api/session"
+            ]
+        )
+    }
+
+    @MainActor
+    func testOpeningExternalSessionCanonicalFallbackKeepsReadOnlyAuthority() async throws {
+        let viewModel = try makeViewModel { request in
+            switch request.url?.path {
+            case "/api/session/import_cli":
+                throw URLError(.timedOut)
+            case "/api/session":
+                return apiTestJSONResponse("""
+                {
+                  "session": {
+                    "session_id": "telegram-read-only",
+                    "is_cli_session": true,
+                    "raw_source": "telegram",
+                    "source_label": "Telegram",
+                    "read_only": true,
+                    "messages": []
+                  }
+                }
+                """, for: request)
+            default:
+                XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
+                throw URLError(.badURL)
+            }
+        }
+        let listed = SessionSummary(
+            sessionId: "telegram-read-only",
+            isCliSession: true,
+            rawSource: "telegram",
+            sourceLabel: "Telegram"
+        )
+
+        let result = await viewModel.sessionForOpening(listed)
+        let opened = try XCTUnwrap(result)
+
+        XCTAssertTrue(opened.isSessionReadOnly)
+        XCTAssertEqual(
+            ChatView.composerReadOnlyMessage(for: opened, isViewingCachedData: false),
+            "Read-only"
+        )
+        XCTAssertNil(viewModel.actionErrorMessage)
+    }
+
+    @MainActor
+    func testOpeningExternalSessionFailureKeepsRowAndSurfacesServerMessage() async throws {
+        let serverMessage = "Messaging sessions cannot be imported"
+        var requestedPaths: [String] = []
+        let viewModel = try makeViewModel { request in
+            requestedPaths.append(request.url?.path ?? "nil")
+            switch request.url?.path {
+            case "/api/sessions":
+                return apiTestJSONResponse("""
+                {
+                  "sessions": [{
+                    "session_id": "telegram-1",
+                    "title": "Support chat",
+                    "is_cli_session": true,
+                    "raw_source": "telegram",
+                    "source_label": "Telegram"
+                  }]
+                }
+                """, for: request)
+            case "/api/session/import_cli":
+                let response = HTTPURLResponse(
+                    url: try XCTUnwrap(request.url),
+                    statusCode: 403,
+                    httpVersion: nil,
+                    headerFields: ["Content-Type": "application/json"]
+                )
+                return (try XCTUnwrap(response), Data(#"{"error":"\#(serverMessage)"}"#.utf8))
+            case "/api/session":
+                throw URLError(.cannotFindHost)
+            default:
+                XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
+                throw URLError(.badURL)
+            }
+        }
+
+        await viewModel.load()
+        let listed = try XCTUnwrap(viewModel.sessions.first)
+        let opened = await viewModel.sessionForOpening(listed)
+
+        XCTAssertNil(opened)
+        XCTAssertEqual(viewModel.sessions, [listed])
+        XCTAssertEqual(viewModel.actionErrorMessage, serverMessage)
+        XCTAssertNotNil(viewModel.lastError)
+        XCTAssertEqual(
+            requestedPaths,
+            ["/api/sessions", "/api/session/import_cli", "/api/session"]
+        )
+    }
+
+    @MainActor
+    func testStaleCanonicalFallbackCannotReplaceNewerDestination() async throws {
+        let detailRequestStarted = expectation(description: "canonical fallback request started")
+        let releaseDetailRequest = DispatchSemaphore(value: 0)
+        let viewModel = try makeViewModel { request in
+            switch request.url?.path {
+            case "/api/session/import_cli":
+                throw URLError(.timedOut)
+            case "/api/session":
+                detailRequestStarted.fulfill()
+                releaseDetailRequest.wait()
+                return apiTestJSONResponse("""
+                {
+                  "session": {
+                    "session_id": "telegram-stale",
+                    "title": "Stale result",
+                    "is_cli_session": true,
+                    "raw_source": "telegram"
+                  }
+                }
+                """, for: request)
+            default:
+                XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
+                throw URLError(.badURL)
+            }
+        }
+        let staleSession = SessionSummary(
+            sessionId: "telegram-stale",
+            title: "Original title",
+            isCliSession: true,
+            rawSource: "telegram"
+        )
+        let newerDestination = SessionSummary(
+            sessionId: "webui-newer",
+            title: "Newer destination",
+            sessionSource: "webui"
+        )
+
+        let staleOpen = Task { @MainActor in
+            await viewModel.sessionForOpening(staleSession)
+        }
+        await fulfillment(of: [detailRequestStarted], timeout: 1)
+
+        let openedNewerDestination = await viewModel.sessionForOpening(newerDestination)
+        releaseDetailRequest.signal()
+        let staleResult = await staleOpen.value
+
+        XCTAssertEqual(openedNewerDestination, newerDestination)
+        XCTAssertNil(staleResult)
+        XCTAssertTrue(viewModel.sessions.isEmpty)
+        XCTAssertNil(viewModel.actionErrorMessage)
+        XCTAssertNil(viewModel.lastError)
+    }
+
+    @MainActor
+    func testOpeningWebUISessionSkipsImportRequest() async throws {
+        var requestedPaths: [String] = []
+        let viewModel = try makeViewModel { request in
+            requestedPaths.append(request.url?.path ?? "nil")
+            XCTFail("WebUI sessions must not reach the import endpoint.")
+            throw URLError(.badURL)
+        }
+        let session = SessionSummary(sessionId: "webui", sessionSource: "webui")
+
+        let opened = await viewModel.sessionForOpening(session)
+
+        XCTAssertEqual(opened, session)
+        XCTAssertTrue(requestedPaths.isEmpty)
+    }
+
+    @MainActor
     func testDuplicatePolicyRejectsExternalSessionsBeforeAnyRequest() async throws {
         var requestedPaths: [String] = []
         let viewModel = try makeViewModel { request in

@@ -70,6 +70,14 @@ struct SessionRowView: View {
             labels.append(String(localized: "Cached"))
         }
 
+        if let sourceLabel = session.sourceDisplayLabel {
+            labels.append(sourceLabel)
+        }
+
+        if session.isSessionReadOnly {
+            labels.append(String(localized: "Read-only"))
+        }
+
         return labels
     }
 
@@ -168,13 +176,21 @@ struct SessionRowView: View {
     @ViewBuilder
     private var supplementalArea: some View {
         if dynamicTypeSize.isAccessibilitySize {
-            VStack(alignment: .leading, spacing: 4) {
-                if !visibleStateBadges.isEmpty {
-                    stateBadgesRow
+            HStack(alignment: .top, spacing: 8) {
+                VStack(alignment: .leading, spacing: 4) {
+                    if !visibleStateBadges.isEmpty {
+                        stateBadgesRow
+                    }
+
+                    if let metadataLabel {
+                        metadataText(metadataLabel)
+                    }
                 }
 
-                if let metadataLabel {
-                    metadataText(metadataLabel)
+                Spacer(minLength: 8)
+
+                if let sourceLabel = session.sourceDisplayLabel {
+                    SessionSourceBadge(label: sourceLabel)
                 }
             }
         } else {
@@ -185,6 +201,12 @@ struct SessionRowView: View {
 
                 if let metadataLabel {
                     metadataText(metadataLabel)
+                }
+
+                Spacer(minLength: 8)
+
+                if let sourceLabel = session.sourceDisplayLabel {
+                    SessionSourceBadge(label: sourceLabel)
                 }
             }
         }
@@ -218,11 +240,19 @@ struct SessionRowView: View {
             badges.append(.cached)
         }
 
+        if session.isSessionReadOnly {
+            badges.append(.readOnly)
+        }
+
         return badges
     }
 
+    private var showsStateBadges: Bool {
+        session.sourceDisplayLabel != nil || !visibleStateBadges.isEmpty
+    }
+
     private var showsSupplementalContent: Bool {
-        metadataLabel != nil || !visibleStateBadges.isEmpty
+        metadataLabel != nil || showsStateBadges
     }
 
     private var rowContentSpacing: CGFloat {
@@ -275,6 +305,7 @@ struct SessionRowView: View {
 private enum SessionRowStateBadgeKind: String, Identifiable {
     case streaming
     case cached
+    case readOnly
 
     var id: String { rawValue }
 
@@ -284,6 +315,8 @@ private enum SessionRowStateBadgeKind: String, Identifiable {
             return String(localized: "Live")
         case .cached:
             return String(localized: "Cached")
+        case .readOnly:
+            return String(localized: "Read-only")
         }
     }
 
@@ -293,7 +326,23 @@ private enum SessionRowStateBadgeKind: String, Identifiable {
             return .green
         case .cached:
             return .orange
+        case .readOnly:
+            return .gray
         }
+    }
+}
+
+private struct SessionSourceBadge: View {
+    let label: String
+
+    var body: some View {
+        Text(label)
+            .font(AppFont.caption2(weight: .semibold))
+            .foregroundStyle(Color.accentColor)
+            .padding(.horizontal, 5)
+            .padding(.vertical, 2)
+            .background(Color.accentColor.opacity(0.12), in: Capsule())
+            .accessibilityHidden(true)
     }
 }
 
