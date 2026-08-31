@@ -272,6 +272,28 @@ final class ComposerVoiceInputController {
 
     static let serverRecordingBitrate = 32_000
     static let serverRecordingFileExtension = "m4a"
+    // Leave 1 MiB below the server's configurable 20 MiB default for the
+    // multipart envelope. A lower custom limit still uses the existing fallback.
+    static let maximumServerRecordingUploadBytes = 19 * 1_024 * 1_024
+
+    static func serverRecordingFileSize(at url: URL) throws -> Int {
+        let values = try url.resourceValues(forKeys: [.fileSizeKey])
+        guard let size = values.fileSize else {
+            throw CocoaError(.fileReadUnknown)
+        }
+        return size
+    }
+
+    /// Returns `nil` before reading an oversized recording into memory.
+    static func loadServerRecordingForUpload(
+        fileSize: Int,
+        dataLoader: () throws -> Data
+    ) rethrows -> Data? {
+        guard fileSize <= maximumServerRecordingUploadBytes else {
+            return nil
+        }
+        return try dataLoader()
+    }
 
     private func startServerRecording() throws {
         stopAudio(cancelTask: true)
@@ -358,8 +380,42 @@ final class ComposerVoiceInputController {
             return
         }
 
+        let fileSize: Int
         do {
-            let audioData = try Data(contentsOf: recordingURL)
+            fileSize = try Self.serverRecordingFileSize(at: recordingURL)
+        } catch {
+            cleanupRecordingFile(recordingURL, transcriptionID: transcriptionID)
+            fail(error.localizedDescription, logCategory: .speechUnavailable)
+            return
+        }
+
+        let audioData: Data?
+        do {
+            audioData = try Self.loadServerRecordingForUpload(
+                fileSize: fileSize,
+                dataLoader: {
+                    try Data(contentsOf: recordingURL)
+                }
+            )
+        } catch {
+            await fallbackFromServerFailure(
+                recordingURL: recordingURL,
+                transcriptionID: transcriptionID,
+                message: error.localizedDescription
+            )
+            return
+        }
+
+        guard let audioData else {
+            await fallbackFromServerFailure(
+                recordingURL: recordingURL,
+                transcriptionID: transcriptionID,
+                message: CocoaError(.fileReadTooLarge).localizedDescription
+            )
+            return
+        }
+
+        do {
             let response = try await apiClient.transcribeAudio(
                 data: audioData,
                 filename: recordingURL.lastPathComponent
