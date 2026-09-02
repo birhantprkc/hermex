@@ -333,6 +333,10 @@ final class ChatViewModel {
     private(set) var hasOlderMessages = false
     private(set) var contextWindowSnapshot: ContextWindowSnapshot?
     private(set) var responseCompletionHapticTrigger = 0
+    /// Bumps at most once per throttle interval while live (non-replay) assistant
+    /// text arrives; the view turns each bump into one streaming pulse haptic.
+    private(set) var streamingHapticPulseTrigger = 0
+    private var streamingHapticPulseThrottle = ChatHaptics.StreamingPulseThrottle()
     private(set) var responseCompletionNeedsTranscriptRefresh = false
     private(set) var modelCatalogGroups: [ModelCatalogGroup] = []
     private(set) var agentCommands: [AgentCommand] = []
@@ -4641,6 +4645,12 @@ final class ChatViewModel {
 
         pendingAssistantTokenChunks.append(remainder)
         scheduleStreamingContentFlush()
+        // Replayed text is catch-up, not new work: reattaching to a running
+        // stream must not pulse for every token that already happened.
+        if !isActiveStreamReplayConnection,
+           streamingHapticPulseThrottle.shouldPulse(at: Date().timeIntervalSinceReferenceDate) {
+            streamingHapticPulseTrigger += 1
+        }
         return true
     }
 
@@ -5323,6 +5333,12 @@ extension ChatViewModel: ChatStreamCoordinatorDelegate {
     }
 
     func streamCoordinatorDidStartConnection(isReplay: Bool) {
+        // A fresh connection re-arms the pulse so a reply's first live token
+        // always ticks, even when the previous reply pulsed less than an interval
+        // ago. A replay continues the same reply, so its window carries over.
+        if !isReplay {
+            streamingHapticPulseThrottle.reset()
+        }
         activeStreamReplayMatchedPrefixLength = 0
         activeStreamReplayMatchedInterimLength = 0
         activeStreamReplayMatchedReasoningLength = 0
