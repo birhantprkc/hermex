@@ -28,6 +28,9 @@ struct ChatTranscriptView: View {
     let showsAssistantTypingIndicator: Bool
     let showsScrollToBottomButton: Bool
     let shouldFollowLatestMessage: Bool
+    /// True while a disclosure toggle animates; suspends the bottom size-change
+    /// anchor and follow-driven scrolls so the tapped row stays stationary.
+    let isDisclosureSettling: Bool
     let latestTranscriptMessageRole: String?
     let isScrolledNearBottom: Bool
     let activeStreamID: String?
@@ -55,6 +58,8 @@ struct ChatTranscriptView: View {
     let onLoadMessages: () async -> Void
     let onLoadOlderMessages: () async -> Bool
     let onUpdateScrollMetrics: (ChatScrollMetrics) -> Void
+    let onFollowEvent: (ChatScrollPolicy.FollowEvent) -> Void
+    let onDisclosureToggle: () -> Void
     let onDismissKeyboard: () -> Void
     let onScrollToBottom: (ScrollViewProxy) -> Void
     let onScrollToLatestTranscriptMessage: (ScrollViewProxy) -> Void
@@ -127,7 +132,8 @@ struct ChatTranscriptView: View {
                     )
                     .defaultScrollAnchor(
                         ChatScrollPolicy.sizeChangeAnchor(
-                            shouldFollowLatestMessage: shouldFollowLatestMessage
+                            shouldFollowLatestMessage: shouldFollowLatestMessage,
+                            isDisclosureSettling: isDisclosureSettling
                         ),
                         for: .sizeChanges
                     )
@@ -166,7 +172,7 @@ struct ChatTranscriptView: View {
                 .animation(ChatMotion.quickState(reduceMotion: reduceMotion), value: showsScrollToBottomButton)
                 .background(Color(.systemBackground))
                 .onChange(of: messages.count) {
-                    guard shouldFollowLatestMessage else { return }
+                    guard isFollowingLatestContent else { return }
 
                     if latestTranscriptMessageRole == "user" {
                         onScrollToLatestTranscriptMessage(proxy)
@@ -175,7 +181,7 @@ struct ChatTranscriptView: View {
                     }
                 }
                 .onChange(of: streamingScrollTrigger) {
-                    if shouldFollowLatestMessage {
+                    if isFollowingLatestContent {
                         onScrollToLatestContent(proxy, true)
                     }
                 }
@@ -183,11 +189,11 @@ struct ChatTranscriptView: View {
                     // Cache-first reconcile (#289): the server transcript just replaced
                     // the lighter cached render, so snap back to the bottom (no
                     // animation) unless the reader has scrolled away in the meantime.
-                    guard shouldFollowLatestMessage else { return }
+                    guard isFollowingLatestContent else { return }
                     onScrollToLatestContent(proxy, false)
                 }
                 .onChange(of: clarificationPrompt?.id) {
-                    guard clarificationPrompt != nil, shouldFollowLatestMessage else { return }
+                    guard clarificationPrompt != nil, isFollowingLatestContent else { return }
                     onScrollToBottom(proxy)
                 }
                 .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)) { _ in
@@ -197,6 +203,12 @@ struct ChatTranscriptView: View {
                 }
             }
         }
+    }
+
+    /// Follow-driven scrolls run only while the latch is on and no disclosure
+    /// toggle is mid-animation.
+    private var isFollowingLatestContent: Bool {
+        shouldFollowLatestMessage && !isDisclosureSettling
     }
 
     private func transcriptScrollContent(
@@ -284,11 +296,13 @@ struct ChatTranscriptView: View {
         .padding(.horizontal, transcriptHorizontalPadding)
         .frame(width: viewportWidth, alignment: .leading)
         .clipped()
+        .environment(\.chatDisclosureToggled, onDisclosureToggle)
         .background {
             ZStack {
                 ChatScrollObserver(
                     isStreaming: activeStreamID != nil,
-                    prependScrollPositionController: prependScrollPositionController
+                    prependScrollPositionController: prependScrollPositionController,
+                    onFollowEvent: onFollowEvent
                 ) { metrics in
                     onUpdateScrollMetrics(metrics)
                 }

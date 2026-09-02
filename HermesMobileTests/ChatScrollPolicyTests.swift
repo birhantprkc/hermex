@@ -64,58 +64,113 @@ final class ChatScrollPolicyTests: XCTestCase {
         )
     }
 
-    func testAutoScrollPausedWhileUserInteracting() {
-        XCTAssertTrue(
-            ChatScrollPolicy.isAutoScrollPaused(
-                isUserInteracting: true,
-                cooldownUntil: nil
-            )
-        )
+    // MARK: Follow latch
+
+    private typealias Latch = ChatScrollPolicy.FollowLatch
+
+    private func follow(_ current: Bool, _ event: ChatScrollPolicy.FollowEvent) -> Bool {
+        ChatScrollPolicy.resolveFollow(current: Latch(isFollowing: current), event: event).isFollowing
     }
 
-    func testAutoScrollPausedDuringCooldownWindow() {
-        let now = Date()
-        let future = now.addingTimeInterval(0.1)
-
-        XCTAssertTrue(
-            ChatScrollPolicy.isAutoScrollPaused(
-                isUserInteracting: false,
-                cooldownUntil: future,
-                now: now
-            )
-        )
+    private func reduce(_ latch: Latch, _ events: ChatScrollPolicy.FollowEvent...) -> Latch {
+        events.reduce(latch) { ChatScrollPolicy.resolveFollow(current: $0, event: $1) }
     }
 
-    func testAutoScrollResumesAfterCooldownExpires() {
-        let now = Date()
-        let past = now.addingTimeInterval(-0.1)
-
-        XCTAssertFalse(
-            ChatScrollPolicy.isAutoScrollPaused(
-                isUserInteracting: false,
-                cooldownUntil: past,
-                now: now
-            )
-        )
+    func testTouchDownTurnsFollowOff() {
+        XCTAssertFalse(follow(true, .userScrollBegin))
+        XCTAssertFalse(follow(false, .userScrollBegin))
     }
 
-    func testAutoScrollNotPausedWithoutInteractionOrCooldown() {
-        XCTAssertFalse(
-            ChatScrollPolicy.isAutoScrollPaused(
-                isUserInteracting: false,
-                cooldownUntil: nil
-            )
-        )
+    func testDragEndAboveBottomKeepsFollowOff() {
+        XCTAssertFalse(follow(false, .userScrollEnd(isAtBottom: false)))
     }
 
-    func testCooldownDeadlineIsUserScrollCooldownInFuture() {
-        let base = Date(timeIntervalSinceReferenceDate: 1_000)
-        let deadline = ChatScrollPolicy.cooldownDeadline(after: base)
+    func testExplicitResetSurvivesLateDragSettlement() {
+        // Drag lifted above the bottom, then send or scroll-to-bottom landed inside the
+        // 160 ms settle window. The late settle report must not undo the reset.
+        let latch = reduce(Latch(), .userScrollBegin, .reset, .userScrollEnd(isAtBottom: false))
+        XCTAssertTrue(latch.isFollowing)
+        XCTAssertFalse(latch.ignoresCoastingGesture)
+    }
 
+    func testExplicitResetSurvivesCoastingMomentum() {
+        // Send or scroll-to-bottom while the transcript is still decelerating: the
+        // remaining momentum ticks belong to the gesture that predates the reset.
+        let coasting = reduce(
+            Latch(),
+            .userScrollBegin,
+            .reset,
+            .contentScrolled(isAtBottom: false, isUserScrolling: true)
+        )
+        XCTAssertTrue(coasting.isFollowing)
+
+        // Once that momentum settles, the next real drag turns follow off as usual.
+        let settled = reduce(coasting, .userScrollEnd(isAtBottom: false))
+        XCTAssertTrue(settled.isFollowing)
+        XCTAssertFalse(settled.ignoresCoastingGesture)
+        XCTAssertFalse(reduce(settled, .contentScrolled(isAtBottom: false, isUserScrolling: true)).isFollowing)
+    }
+
+    func testNewDragAfterResetTurnsFollowOff() {
+        let latch = reduce(Latch(), .reset, .userScrollBegin)
+        XCTAssertFalse(latch.isFollowing)
+        XCTAssertFalse(latch.ignoresCoastingGesture)
+    }
+
+    func testDragEndAtBottomReArmsFollow() {
+        XCTAssertTrue(follow(false, .userScrollEnd(isAtBottom: true)))
+    }
+
+    func testMomentumEndDecidesFromWhereItSettled() {
+        // A fling that stops mid-transcript stays off; one that lands at the end re-arms.
+        XCTAssertFalse(follow(false, .userScrollEnd(isAtBottom: false)))
+        XCTAssertTrue(follow(false, .userScrollEnd(isAtBottom: true)))
+    }
+
+    func testLayoutGrowthWhileOffNeverReArms() {
+        // Streaming tokens push the bottom away; that alone must not re-pin the reader.
+        XCTAssertFalse(follow(false, .contentScrolled(isAtBottom: false, isUserScrolling: false)))
+    }
+
+    func testLayoutGrowthWhileFollowingStaysOn() {
+        // Keyboard presentation and token growth move the offset without a gesture.
+        XCTAssertTrue(follow(true, .contentScrolled(isAtBottom: false, isUserScrolling: false)))
+    }
+
+    func testNonGestureScrollThatLandsAtBottomReArms() {
+        XCTAssertTrue(follow(false, .contentScrolled(isAtBottom: true, isUserScrolling: false)))
+    }
+
+    func testLiveGestureWinsEvenAtBottom() {
+        XCTAssertFalse(follow(true, .contentScrolled(isAtBottom: true, isUserScrolling: true)))
+    }
+
+    func testExplicitActionsBypassTheLatch() {
+        XCTAssertTrue(follow(false, .reset))
+        XCTAssertTrue(follow(true, .reset))
+    }
+
+    func testReArmRequiresStrictBottom() {
+        XCTAssertTrue(ChatScrollPolicy.isAtBottom(distanceFromBottom: ChatScrollPolicy.followReArmThreshold))
+        XCTAssertFalse(ChatScrollPolicy.isAtBottom(distanceFromBottom: ChatScrollPolicy.followReArmThreshold + 1))
+        XCTAssertLessThan(ChatScrollPolicy.followReArmThreshold, ChatScrollPolicy.bottomDetectionThreshold)
+    }
+
+    func testDragSettleWaitsForLateMomentum() {
+        XCTAssertEqual(ChatScrollPolicy.dragSettleDelay, 0.16, accuracy: 0.0001)
+        XCTAssertLessThan(ChatScrollPolicy.momentumSettleDelay, ChatScrollPolicy.dragSettleDelay)
+    }
+
+    func testDisclosureToggleSuspendsBottomAnchorWhileFollowing() {
+        XCTAssertNil(
+            ChatScrollPolicy.sizeChangeAnchor(shouldFollowLatestMessage: true, isDisclosureSettling: true)
+        )
         XCTAssertEqual(
-            deadline.timeIntervalSince(base),
-            ChatScrollPolicy.userScrollCooldown,
-            accuracy: 0.0001
+            ChatScrollPolicy.sizeChangeAnchor(shouldFollowLatestMessage: true, isDisclosureSettling: false),
+            .bottom
+        )
+        XCTAssertNil(
+            ChatScrollPolicy.sizeChangeAnchor(shouldFollowLatestMessage: false, isDisclosureSettling: false)
         )
     }
 }
