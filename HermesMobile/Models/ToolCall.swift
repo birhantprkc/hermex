@@ -2,6 +2,8 @@ import Foundation
 
 struct ToolCall: Identifiable, Equatable {
     let id: String
+    /// Keeps disclosure state attached while a later event replaces a generated server ID.
+    let presentationID: String
     var name: String?
     var preview: String?
     var args: [String: JSONValue]?
@@ -12,6 +14,7 @@ struct ToolCall: Identifiable, Equatable {
 
     init(
         id: String = "live-tool-\(UUID().uuidString)",
+        presentationID: String? = nil,
         name: String?,
         preview: String?,
         args: [String: JSONValue]?,
@@ -21,6 +24,7 @@ struct ToolCall: Identifiable, Equatable {
         startedAt: Double = Date().timeIntervalSince1970
     ) {
         self.id = id
+        self.presentationID = presentationID ?? id
         self.name = name
         self.preview = preview
         self.args = args
@@ -598,7 +602,8 @@ struct ToolCallGroup: Identifiable, Equatable {
             ) {
                 mergedToolCalls[existingIndex] = mergingToolCall(
                     mergedToolCalls[existingIndex],
-                    with: fallbackToolCall
+                    with: fallbackToolCall,
+                    presentationID: fallbackToolCall.presentationID
                 )
             } else {
                 mergedToolCalls.append(fallbackToolCall)
@@ -676,11 +681,16 @@ struct ToolCallGroup: Identifiable, Equatable {
         return JSONValue.object(sortedObject).compactJSONString ?? ""
     }
 
-    private static func mergingToolCall(_ existing: ToolCall, with fallback: ToolCall) -> ToolCall {
+    private static func mergingToolCall(
+        _ existing: ToolCall,
+        with fallback: ToolCall,
+        presentationID: String? = nil
+    ) -> ToolCall {
         let id = isGeneratedToolID(existing.id) && !isGeneratedToolID(fallback.id) ? fallback.id : existing.id
 
         return ToolCall(
             id: id,
+            presentationID: presentationID ?? existing.presentationID,
             name: existing.name ?? fallback.name,
             preview: existing.preview ?? fallback.preview,
             args: existing.args ?? fallback.args,
