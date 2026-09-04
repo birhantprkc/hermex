@@ -142,6 +142,10 @@ struct MessageComposerView: View {
 
     @State private var textFieldHeight: CGFloat = 0
     @State private var textInputHeight: CGFloat = 22
+    /// Where the caret is in `draftMessage`, in UTF-16 units. Transient by
+    /// design: a restored draft starts with the caret at its end, not wherever
+    /// it was left last week.
+    @State private var composerSelection = ComposerSelection()
     @State private var noticeMessage: String?
     @State private var showsAllModelsSheet = false
     @State private var showsWorkspaceSheet = false
@@ -173,30 +177,25 @@ struct MessageComposerView: View {
         case waitingForUploadsToFinish
     }
 
-    private var showsSlashAutocomplete: Bool {
-        let query = draftMessage.drop(while: { $0.isWhitespace })
-        guard query.hasPrefix("/") else { return false }
+    /// The `/…` the caret is sitting in, whether that is the start of the draft
+    /// or the middle of a sentence.
+    private var slashTrigger: ComposerSlashTrigger? {
+        ComposerSlashTrigger.detect(in: draftMessage, selection: composerSelection.range)
+    }
 
-        let parsed = ParsedSlashQuery(query: draftMessage)
-        if let command = parsed.command,
-           command.subArgs == .none,
-           hasWhitespaceAfterSlashCommand(command.name, in: String(query)) {
-            return false
-        }
+    /// What the panel filters on, or `nil` when it should be closed.
+    ///
+    /// A command the user has typed past no longer produces a trigger at all —
+    /// `ComposerSlashTrigger` ends at the space after a command that takes no
+    /// sub-argument — so the only cases left here are the two sub-argument lists
+    /// that go quiet once their argument is settled.
+    private var slashQuery: String? {
+        guard let query = slashTrigger?.text else { return nil }
 
-        if SlashSkillFormatter.skill(named: parsed.commandName, in: skillSuggestions) != nil,
-           hasWhitespaceAfterSlashCommand(parsed.commandName, in: String(query)) {
-            return false
-        }
-
-        if AgentSlashCommandSuggestion.command(named: parsed.commandName, in: agentCommands) != nil,
-           hasWhitespaceAfterSlashCommand(parsed.commandName, in: String(query)) {
-            return false
-        }
-
+        let parsed = ParsedSlashQuery(query: query)
         if parsed.commandName.lowercased() == "skills",
            SlashSkillFormatter.invocation(from: parsed.argQuery, suggestions: skillSuggestions) != nil {
-            return false
+            return nil
         }
 
         if parsed.command?.subArgs == .goalActions,
@@ -205,21 +204,28 @@ struct MessageComposerView: View {
            !SlashCommandCatalog.goalActions.contains(where: {
                $0.hasPrefix(parsed.argQuery.lowercased())
            }) {
-            return false
+            return nil
         }
 
-        return true
+        return query
     }
 
-    private func hasWhitespaceAfterSlashCommand(_ commandName: String, in query: String) -> Bool {
-        let prefix = "/\(commandName)"
-        guard query.lowercased().hasPrefix(prefix.lowercased()) else { return false }
-        let afterCommand = query.dropFirst(prefix.count)
-        return afterCommand.first?.isWhitespace == true
+    private var showsSlashAutocomplete: Bool {
+        slashQuery != nil
+    }
+
+    /// Swaps the `/…` at the caret for `replacement` and leaves the caret just
+    /// after it, so the rest of the draft survives accepting a row.
+    private func applyCompletion(_ replacement: String) {
+        guard let trigger = slashTrigger else { return }
+
+        let completed = trigger.applying(replacement, to: draftMessage)
+        draftMessage = completed.draft
+        composerSelection = composerSelection.moved(to: completed.selection)
     }
 
     private var parsedSlashQuery: ParsedSlashQuery {
-        ParsedSlashQuery(query: draftMessage)
+        ParsedSlashQuery(query: slashQuery ?? "")
     }
 
     private var slashAutocompleteLoadKey: String {
@@ -270,9 +276,9 @@ struct MessageComposerView: View {
                 }
 
                 Group {
-                    if showsSlashAutocomplete {
+                    if let slashQuery {
                         SlashCommandAutocompleteView(
-                            query: draftMessage,
+                            query: slashQuery,
                             selectedModelID: selectedModelID,
                             modelGroups: modelGroups,
                             workspaceRoots: workspaceRoots,
@@ -282,23 +288,22 @@ struct MessageComposerView: View {
                             agentCommands: agentCommands,
                             selectedReasoningEffort: selectedReasoningEffort,
                             onSelectCommand: { command in
-                                draftMessage = "/\(command.name) "
+                                applyCompletion("/\(command.name) ")
                             },
                             onSelectSkillCommand: { skill in
-                                draftMessage = "/\(skill.slashName) "
+                                applyCompletion("/\(skill.slashName) ")
                             },
                             onSelectAgentCommand: { command in
-                                draftMessage = "/\(command.name) "
+                                applyCompletion("/\(command.name) ")
                             },
                             onSelectSkillSubArg: { skill in
-                                draftMessage = "/skills \(skill.slashName) "
+                                applyCompletion("/skills \(skill.slashName) ")
                             },
                             onSelectSubArg: { subArg in
-                                let parsed = ParsedSlashQuery(query: draftMessage)
-                                draftMessage = "/\(parsed.commandName) \(subArg)"
+                                applyCompletion("/\(parsedSlashQuery.commandName) \(subArg)")
                             },
                             onDismiss: {
-                                draftMessage = ""
+                                applyCompletion("")
                             }
                         )
                         .padding(.horizontal)
@@ -564,6 +569,7 @@ struct MessageComposerView: View {
             HStack(alignment: .center, spacing: 4) {
                 ComposerTextInputView(
                     text: $draftMessage,
+                    selection: $composerSelection,
                     isFocused: $isFocused,
                     inputHeight: $textInputHeight,
                     measuredHeight: $textFieldHeight,
