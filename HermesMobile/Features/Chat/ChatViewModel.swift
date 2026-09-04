@@ -242,7 +242,11 @@ final class ChatViewModel {
     /// (tool-call / reasoning cards, content parts) is taller than the lighter cached
     /// render, so the view re-pins to the bottom on this token *without* animation —
     /// otherwise the height growth produces a visible scroll jump.
-    private(set) var cacheFirstReconcileScrollToken = 0
+    /// Bumped whenever something re-lays out the transcript under the reader
+    /// without adding a message: the server transcript replacing the lighter
+    /// cache-first render, or the skill catalog turning sent `/slug` text into
+    /// chips. A reader who was pinned to the bottom is put back there.
+    private(set) var transcriptRelayoutScrollToken = 0
     private var hasPrimedInitialCachedMessages = false
     @ObservationIgnored private var pendingStreamingScrollTriggerTask: Task<Void, Never>?
     @ObservationIgnored private var pendingAssistantTokenChunks: [String] = []
@@ -348,6 +352,10 @@ final class ChatViewModel {
     private(set) var workspaceSuggestions: [String] = []
     private(set) var personalitySuggestions: [String] = ["none"]
     private(set) var skillSlashSuggestions: [SkillSlashSuggestion] = []
+    /// The same skills in the shape the chip tokenizer needs, kept beside the
+    /// list so the transcript's `body` never rebuilds it. Always assigned
+    /// through `applySkillSlashSuggestions(_:)`.
+    private(set) var skillChipCatalog: ComposerChipCatalog = .empty
     private(set) var profileOptions: [ProfileSummary] = []
     private(set) var isSingleProfileMode = false
     private(set) var selectedProfileName: String?
@@ -1009,7 +1017,9 @@ final class ChatViewModel {
                 guard let self else { return }
                 do {
                     let response = try await self.client.skills()
-                    self.skillSlashSuggestions = SlashSkillFormatter.suggestions(from: response.skills ?? [])
+                    self.applySkillSlashSuggestions(
+                        SlashSkillFormatter.suggestions(from: response.skills ?? [])
+                    )
                     self.hasLoadedSkillSlashSuggestions = true
                 } catch {
                     self.lastError = error
@@ -1401,7 +1411,7 @@ final class ChatViewModel {
             if renderedCacheFirst {
                 // The taller server transcript has now replaced the lighter cache-first
                 // render; signal the view to re-pin to the bottom without a visible jump.
-                cacheFirstReconcileScrollToken += 1
+                transcriptRelayoutScrollToken += 1
             }
             latestServerLoadHadAssistantResponseAfterLatestUser = Self.hasAssistantResponseAfterLatestUser(
                 in: messages
@@ -3074,9 +3084,25 @@ final class ChatViewModel {
 
         let response = try await client.skills()
         let suggestions = SlashSkillFormatter.suggestions(from: response.skills ?? [])
-        skillSlashSuggestions = suggestions
+        applySkillSlashSuggestions(suggestions)
         hasLoadedSkillSlashSuggestions = true
         return suggestions
+    }
+
+    /// The one way the skill list changes, so the chip catalog can never fall
+    /// out of step with it.
+    private func applySkillSlashSuggestions(_ suggestions: [SkillSlashSuggestion]) {
+        let previousCatalog = skillChipCatalog
+        skillSlashSuggestions = suggestions
+        skillChipCatalog = ComposerChipCatalog(skills: suggestions)
+
+        // A catalog that draws differently redraws the transcript: sent `/slug`
+        // text becomes a chip, or an existing chip changes size or goes away.
+        // Signal the relayout so a reader pinned to the bottom stays there. A
+        // list that came back the same changes nothing and says nothing.
+        if skillChipCatalog != previousCatalog {
+            transcriptRelayoutScrollToken += 1
+        }
     }
 
     private func branchSessionFromSlashCommand(_ args: String) async -> SlashCommandExecutionResult {
