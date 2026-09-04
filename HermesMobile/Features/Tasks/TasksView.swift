@@ -7,6 +7,12 @@ struct TasksView: View {
     @State private var viewModel: TasksViewModel
     @State private var isPresentingCreateTask = false
     @State private var jobPendingDeletion: CronJob?
+    /// "Ran Recently" shows a few rows until the user asks for the rest. View
+    /// state only: every fresh visit starts compact.
+    @State private var isShowingAllRecentRuns = false
+
+    /// Rows "Ran Recently" shows before it needs a "Show all" row.
+    private static let compactRecentRunCount = 3
 
     init(server: URL, onAPIError: @escaping (Error) -> Void) {
         self.server = server
@@ -110,14 +116,21 @@ struct TasksView: View {
     @ViewBuilder
     private var agenda: some View {
         Group {
-            if sections.isEmpty {
-                ContentUnavailableView {
-                    Label("No Matching Tasks", systemImage: "line.3.horizontal.decrease.circle")
-                } description: {
-                    Text("No tasks match this filter.")
-                }
+            if sections.isEmpty && viewModel.recentRuns.isEmpty {
+                noMatchingTasks
             } else {
+                // The list stays mounted while the feed has rows, so switching
+                // to a filter with no tasks does not take "Ran Recently" away.
                 List {
+                    recentRunsSection
+
+                    if sections.isEmpty {
+                        Section {
+                            noMatchingTasks
+                                .listRowBackground(Color.clear)
+                        }
+                    }
+
                     ForEach(sections) { section in
                         Section(section.group.title) {
                             ForEach(section.jobs) { job in
@@ -136,6 +149,14 @@ struct TasksView: View {
         }
     }
 
+    private var noMatchingTasks: some View {
+        ContentUnavailableView {
+            Label("No Matching Tasks", systemImage: "line.3.horizontal.decrease.circle")
+        } description: {
+            Text("No tasks match this filter.")
+        }
+    }
+
     private var filterPicker: some View {
         Picker("Filter", selection: $viewModel.filter) {
             ForEach(TaskFilter.allCases) { filter in
@@ -148,17 +169,57 @@ struct TasksView: View {
         .background(.bar)
     }
 
+    /// Cross-task recent completions, above the agenda and outside the filter.
+    /// Absent until the feed answers and whenever it is empty or failed.
+    @ViewBuilder
+    private var recentRunsSection: some View {
+        let recentRuns = viewModel.recentRuns
+        if !recentRuns.isEmpty {
+            let isTruncated = recentRuns.count > Self.compactRecentRunCount && !isShowingAllRecentRuns
+            let visibleRuns = isTruncated ? Array(recentRuns.prefix(Self.compactRecentRunCount)) : recentRuns
+
+            Section("Ran Recently") {
+                ForEach(visibleRuns) { completion in
+                    if let job = viewModel.job(for: completion) {
+                        NavigationLink {
+                            detail(for: job)
+                        } label: {
+                            TaskRecentRunRowView(completion: completion)
+                        }
+                    } else {
+                        // The feed named a job the list does not have: no link,
+                        // no chevron, and nothing that reads as a button.
+                        TaskRecentRunRowView(completion: completion)
+                    }
+                }
+
+                if recentRuns.count > Self.compactRecentRunCount {
+                    Button {
+                        isShowingAllRecentRuns.toggle()
+                    } label: {
+                        Text(isTruncated ? "Show All (\(recentRuns.count))" : "Show Less")
+                            .font(.subheadline)
+                    }
+                }
+            }
+        }
+    }
+
+    private func detail(for job: CronJob) -> some View {
+        TaskDetailView(
+            job: job,
+            runningElapsed: viewModel.runningElapsed(for: job),
+            server: server,
+            onAPIError: onAPIError,
+            onMutation: { mutation in
+                viewModel.apply(mutation)
+            }
+        )
+    }
+
     private func row(for job: CronJob, in group: TaskAgendaGroup) -> some View {
         NavigationLink {
-            TaskDetailView(
-                job: job,
-                runningElapsed: viewModel.runningElapsed(for: job),
-                server: server,
-                onAPIError: onAPIError,
-                onMutation: { mutation in
-                    viewModel.apply(mutation)
-                }
-            )
+            detail(for: job)
         } label: {
             CronJobRowView(
                 job: job,
