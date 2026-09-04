@@ -8592,6 +8592,83 @@ final class ChatViewModelSendTests: XCTestCase {
         XCTAssertEqual(attempts, 2)
     }
 
+    // MARK: - Personality slash suggestions
+
+    /// The personality list is loaded from the same kind of `.task` modifier as
+    /// the skill list, so it needs the same protection (#387): a caller SwiftUI
+    /// cancels must not take the shared fetch down with it and leave the
+    /// personality picker permanently empty.
+    @MainActor
+    func testCancellingACallerDoesNotAbortThePersonalityLoad() async throws {
+        let viewModel = try makeViewModel { request in
+            XCTAssertEqual(request.url?.path, "/api/personalities")
+            return apiTestJSONResponse(#"{"personalities": [{"name": "mentor"}]}"#, for: request)
+        }
+
+        let caller = Task { await viewModel.loadPersonalitySuggestions() }
+        caller.cancel()
+        await caller.value
+
+        XCTAssertEqual(viewModel.personalitySuggestions, ["none", "mentor"])
+    }
+
+    /// A load that fails leaves nothing behind, so the next caller retries
+    /// rather than awaiting the finished, empty-handed task.
+    @MainActor
+    func testAFailedPersonalityLoadIsRetriedByTheNextCaller() async throws {
+        var attempts = 0
+        let viewModel = try makeViewModel { request in
+            attempts += 1
+            guard attempts > 1 else {
+                return (
+                    HTTPURLResponse(url: request.url!, statusCode: 500, httpVersion: nil, headerFields: nil)!,
+                    Data()
+                )
+            }
+            return apiTestJSONResponse(#"{"personalities": [{"name": "mentor"}]}"#, for: request)
+        }
+
+        await viewModel.loadPersonalitySuggestions()
+        XCTAssertEqual(viewModel.personalitySuggestions, ["none"])
+
+        await viewModel.loadPersonalitySuggestions()
+        XCTAssertEqual(viewModel.personalitySuggestions, ["none", "mentor"])
+        XCTAssertEqual(attempts, 2)
+    }
+
+    /// The point of the shared handle: a caller arriving mid-flight joins the
+    /// request already running instead of firing its own and returning early
+    /// with an empty list. The mock holds the response open until the second
+    /// caller has arrived, so it really does land on the in-flight branch.
+    @MainActor
+    func testAConcurrentCallerJoinsTheInFlightPersonalityLoad() async throws {
+        let requestStarted = XCTestExpectation(description: "personality request started")
+        let releaseResponse = DispatchSemaphore(value: 0)
+        var attempts = 0
+        let viewModel = try makeViewModel { request in
+            XCTAssertEqual(request.url?.path, "/api/personalities")
+            attempts += 1
+            requestStarted.fulfill()
+            // Bounded so a second, unshared request fails the count assertion
+            // below instead of hanging the test.
+            _ = releaseResponse.wait(timeout: .now() + 5)
+            return apiTestJSONResponse(#"{"personalities": [{"name": "mentor"}]}"#, for: request)
+        }
+
+        let first = Task { await viewModel.loadPersonalitySuggestions() }
+        await fulfillment(of: [requestStarted], timeout: 5)
+
+        let second = Task { await viewModel.loadPersonalitySuggestions() }
+        await Task.yield()
+        releaseResponse.signal()
+
+        await first.value
+        await second.value
+
+        XCTAssertEqual(viewModel.personalitySuggestions, ["none", "mentor"])
+        XCTAssertEqual(attempts, 1)
+    }
+
     /// Sent references become chips the moment the catalog lands, and a chip is
     /// not the size of the `/slug` it replaces, so the transcript has to be told
     /// it just re-laid out under the reader (#388).
