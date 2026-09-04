@@ -92,6 +92,9 @@ struct MessageComposerView: View {
     let workspaceManagementServer: URL?
     let personalitySuggestions: [String]
     let skillSuggestions: [SkillSlashSuggestion]
+    /// Whether a skills request has succeeded, even an empty one. Lets the
+    /// mid-sentence close rule tell "still loading" from "loaded, none match".
+    let hasLoadedSkillSuggestions: Bool
     let agentCommands: [AgentCommand]
     let profileOptions: [ProfileSummary]
     let isSingleProfileMode: Bool
@@ -187,8 +190,9 @@ struct MessageComposerView: View {
     ///
     /// A command the user has typed past no longer produces a trigger at all —
     /// `ComposerSlashTrigger` ends at the space after a command that takes no
-    /// sub-argument — so the only cases left here are the two sub-argument lists
-    /// that go quiet once their argument is settled.
+    /// sub-argument — so besides the trigger itself, three things close the
+    /// panel: a settled `/skills` invocation, a settled goal action, and a
+    /// mid-sentence word no loaded skill matches.
     private var slashQuery: String? {
         guard let query = slashTrigger?.text else { return nil }
 
@@ -207,11 +211,29 @@ struct MessageComposerView: View {
             return nil
         }
 
+        // Mid-sentence the panel's only content is skills, so once the catalog
+        // question is settled — a request has succeeded, even one that found
+        // no skills — and nothing matches the typed word, close rather than
+        // hold an empty box up. Before that, keep the panel open so its load
+        // task can fetch the list and judge the word against real data.
+        if slashTrigger?.startsDraft == false,
+           hasLoadedSkillSuggestions,
+           SlashSkillFormatter.matching(parsed.commandName, in: skillSuggestions).isEmpty {
+            return nil
+        }
+
         return query
     }
 
     private var showsSlashAutocomplete: Bool {
         slashQuery != nil
+    }
+
+    /// Whether the panel may only offer skills. The send path runs a command
+    /// only when the trimmed draft starts with `/`, so past other text a
+    /// command row would be inserted text nothing executes.
+    private var showsSlashAutocompleteSkillsOnly: Bool {
+        !(slashTrigger?.startsDraft ?? true)
     }
 
     /// Swaps the `/…` at the caret for `replacement` and leaves the caret just
@@ -286,6 +308,7 @@ struct MessageComposerView: View {
                             personalitySuggestions: personalitySuggestions,
                             skillSuggestions: skillSuggestions,
                             agentCommands: agentCommands,
+                            skillsOnly: showsSlashAutocompleteSkillsOnly,
                             selectedReasoningEffort: selectedReasoningEffort,
                             onSelectCommand: { command in
                                 applyCompletion("/\(command.name) ")
