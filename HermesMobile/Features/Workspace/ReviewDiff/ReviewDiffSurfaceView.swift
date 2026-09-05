@@ -6,12 +6,16 @@ import UIKit
 /// keeps the file under the reader still when rows above it change height.
 final class ReviewDiffSurfaceView: UIView, UIScrollViewDelegate {
     private let scrollView = UIScrollView()
-    private let canvas = ReviewDiffCanvasView()
+    private let canvas: ReviewDiffCanvasView
     private let refreshControl = UIRefreshControl()
-    private var pendingScrollFileID: String?
+    private var pendingScroll: ReviewDiffScrollTarget.Anchor?
     private var pendingScrollAnimated = false
+    private var reportedVisibleRowRange: ClosedRange<Int>?
 
     var onPullToRefresh: (() -> Void)?
+    /// Rows intersecting the viewport changed; the host uses it to highlight only
+    /// what is on screen.
+    var onVisibleRowRangeChange: ((ClosedRange<Int>?) -> Void)?
     var onToggleFile: ((String) -> Void)? {
         get { canvas.onToggleFile }
         set { canvas.onToggleFile = newValue }
@@ -35,9 +39,32 @@ final class ReviewDiffSurfaceView: UIView, UIScrollViewDelegate {
         get { canvas.selectedRowIDs }
         set { canvas.selectedRowIDs = newValue }
     }
+    /// Toggling wrap changes row heights above the viewport, so the row at the top
+    /// is kept where it is drawn.
+    var wrapsLines: Bool {
+        get { canvas.wrapsLines }
+        set {
+            guard newValue != canvas.wrapsLines else { return }
+            let anchor = currentRowAnchor()
+            canvas.wrapsLines = newValue
+            restore(anchor)
+        }
+    }
+    /// Current scroll position; tests read it.
+    var verticalOffset: CGFloat { scrollView.contentOffset.y }
 
-    override init(frame: CGRect) {
-        super.init(frame: frame)
+    /// Vertical extent of a row in content coordinates.
+    func frame(forRowID rowID: String) -> (minY: CGFloat, height: CGFloat)? {
+        rows.firstIndex { $0.id == rowID }.flatMap { canvas.layout.frame(forRowAt: $0) }
+    }
+    var tokensByRowID: [String: [SourceHighlightRun]] {
+        get { canvas.tokensByRowID }
+        set { canvas.tokensByRowID = newValue }
+    }
+
+    init(presentation: ReviewDiffPresentation = .diff) {
+        canvas = ReviewDiffCanvasView(frame: .zero, presentation: presentation)
+        super.init(frame: .zero)
         clipsToBounds = true
         backgroundColor = canvas.theme.background
 
@@ -93,10 +120,16 @@ final class ReviewDiffSurfaceView: UIView, UIScrollViewDelegate {
         restore(anchor)
     }
 
-    func scrollToFile(_ fileID: String, animated: Bool) {
-        pendingScrollFileID = fileID
+    /// A file header lands at the top; a row lands 30 % down the viewport so the
+    /// reader sees what leads into it. Applied once the layout can place it.
+    func scroll(to anchor: ReviewDiffScrollTarget.Anchor, animated: Bool) {
+        pendingScroll = anchor
         pendingScrollAnimated = animated
         applyPendingScrollIfNeeded()
+    }
+
+    func scrollToFile(_ fileID: String, animated: Bool) {
+        scroll(to: .fileHeader(fileID), animated: animated)
     }
 
     /// The host owns the spinner: it stays until the reload finishes, not until the
@@ -134,14 +167,38 @@ final class ReviewDiffSurfaceView: UIView, UIScrollViewDelegate {
         setVerticalOffset(headerOffset - anchor.screenY, animated: false)
     }
 
+    private struct RowAnchor {
+        let rowIndex: Int
+        let screenY: CGFloat
+    }
+
+    private func currentRowAnchor() -> RowAnchor? {
+        let offset = scrollView.contentOffset.y
+        guard offset > 0.5, let rowIndex = canvas.layout.rowIndex(at: offset),
+              let frame = canvas.layout.frame(forRowAt: rowIndex) else { return nil }
+        return RowAnchor(rowIndex: rowIndex, screenY: frame.minY - offset)
+    }
+
+    private func restore(_ anchor: RowAnchor?) {
+        guard let anchor, let frame = canvas.layout.frame(forRowAt: anchor.rowIndex) else { return }
+        setVerticalOffset(frame.minY - anchor.screenY, animated: false)
+    }
+
     private func applyPendingScrollIfNeeded() {
-        guard let fileID = pendingScrollFileID, bounds.height > 0 else { return }
-        guard let headerOffset = canvas.layout.fileHeaderOffset(forFileID: fileID) else {
-            if !rows.isEmpty { pendingScrollFileID = nil }
+        guard let anchor = pendingScroll, bounds.height > 0 else { return }
+        let target: CGFloat?
+        switch anchor {
+        case .fileHeader(let fileID):
+            target = canvas.layout.fileHeaderOffset(forFileID: fileID)
+        case .row(let rowID):
+            target = frame(forRowID: rowID).map { $0.minY - max(0, (bounds.height - $0.height) * 0.3) }
+        }
+        guard let target else {
+            if !rows.isEmpty { pendingScroll = nil }
             return
         }
-        pendingScrollFileID = nil
-        setVerticalOffset(headerOffset, animated: pendingScrollAnimated)
+        pendingScroll = nil
+        setVerticalOffset(target, animated: pendingScrollAnimated)
     }
 
     private func setVerticalOffset(_ target: CGFloat, animated: Bool) {
@@ -175,6 +232,15 @@ final class ReviewDiffSurfaceView: UIView, UIScrollViewDelegate {
         )
         canvas.verticalOffset = scrollView.contentOffset.y
         canvas.setNeedsDisplay()
+        reportVisibleRowRangeIfChanged()
+    }
+
+    private func reportVisibleRowRangeIfChanged() {
+        let offset = scrollView.contentOffset.y
+        let range = canvas.layout.rowRange(intersecting: max(0, offset), offset + bounds.height)
+        guard range != reportedVisibleRowRange else { return }
+        reportedVisibleRowRange = range
+        onVisibleRowRangeChange?(range)
     }
 
     func scrollViewDidScroll(_ scrollView: UIScrollView) {
